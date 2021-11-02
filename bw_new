@@ -1,0 +1,174 @@
+#!/usr/bin/env python
+
+import sys
+import os
+import subprocess
+import json
+from enum import IntEnum
+from pprint import pprint
+from getpass import getpass
+
+# dependencies
+#   - bitwarden-cli  (authenticated once using apisecret)
+#   - keyctl
+
+# config
+
+# TODO: correct error reporting
+
+EMAIL = "joseph@holten.com"
+method = 3
+AUTO_LOCK = 900
+AUTO_LOGOUT = 120   # in minutes
+
+def bw_status(session_key=""):
+    if session_key:
+        output = subprocess.run(['bw', 'status', '--session', session_key], capture_output=True, text=True)
+        #print(output)
+        return json.loads(output.stdout)
+    
+    output = subprocess.run(['bw', 'status'], capture_output=True, text=True)
+    #print(output)
+    return json.loads(subprocess.run(['bw', 'status'], capture_output=True, text=True).stdout)
+
+def all_unique(container):
+    return len(container) == len(set(container))
+
+status = bw_status()
+
+session_key = ""
+
+if status['status'] == 'unlocked':
+    session_key = os.environ.get('BW_SESSION')
+    print("Vault unlocked!", file=sys.stderr)
+
+else:
+    # try to find session key in keyctl 
+    output = subprocess.run(["keyctl", "request", "user", "bw_session"], capture_output=True, text=True)
+
+    # session key available
+    if not output.stderr and output.stdout.rstrip("\n").isdigit():  
+        key_id = output.stdout.rstrip("\n")
+        output = subprocess.run(["keyctl", "print", key_id], capture_output=True, text=True)
+
+        session_key = output.stdout.rstrip("\n")
+
+    # no session key saved with keyctl (i.e. locked or unauthenticated) or session key invalid
+    if output.stderr or bw_status(session_key)['status'] != "unlocked":
+        # definitely need password
+        password = getpass("Password: ")
+        password = password.rstrip('\n')
+
+        output = None
+
+        if status['status'] == 'unauthenticated':
+            code = getpass("2FA code: ")
+            output = subprocess.run(['bw', 'login', 'joseph@holten.com', password, '--method', '3', '--code', code, "--raw"], capture_output=True, text=True)
+            
+            print("Logged into vault")
+
+
+        elif status['status'] == 'locked':
+            output = subprocess.run(["bw", "unlock", password, "--raw"], capture_output=True, text=True) 
+            print("Unlocked vault")
+
+        else:
+            assert False, f"Unhandled status {status}"
+
+        session_key = output.stdout.rstrip("\n")
+
+    else:
+        print("Success getting session_key from keyctl, session_key is", session_key)
+
+
+
+# register session_key with keyctl
+output = subprocess.run(["keyctl", "add", "user", "bw_session", session_key, "@u"], capture_output=True, text=True)
+key_id = output.stdout.rstrip("\n")
+output = subprocess.run(["keyctl", "timeout", key_id, str(AUTO_LOCK)], capture_output=True, text=True)
+
+# deschedule old logout
+output = subprocess.run(["keyctl", "request", "user", "bw_logout"], capture_output=True, text=True)
+if output.stdout.rstrip("\n").isdigit():  # have gotten a key_id
+    # remove pending logout
+    key_id = output.stdout.rstrip("\n")
+    output = subprocess.run(["keyctl", "print", key_id], capture_output=True, text=True)
+    job_id = output.stdout.rstrip("\n")
+
+    output = subprocess.run(["atrm", job_id], capture_output=True, text=True)
+
+
+elif output.stderr != "request_key: Required key not available\n":  # some error, that is not that the job has already been performed
+    print("Error rescheduling 'bw logout': couldn't get job_id from keyctl.\nkeyctl error message: ", output, file=sys.stderr)
+    exit(1)
+            
+# MAIN PART
+
+if len(sys.argv) != 2:
+    print("Please give a task (one of 'edit', 'new')")
+    exit(1)
+
+if sys.argv[1] == "edit":
+    output = subprocess.run(["bw", "list", "items", "--session", session_key], capture_output=True, text=True)
+    items = json.loads(output.stdout)
+    items = [ item for item in items if 'login' in item ]  # restrict ourselves to login
+
+    rofi_input = [ item['name'] for item in items ]
+    rofi_input = "\n".join(rofi_input)
+
+    output = subprocess.run(f'echo "{rofi_input}" | rofi -dmenu -p BW', capture_output=True, text=True, shell=True)
+    name = output.stdout.rstrip("\n")
+    items = list(filter(lambda item: item['name'] == name, items))
+
+    if len(items) > 1:
+        for idx, item in enumerate(items):
+            print(f"{idx}: ", end="")
+            pprint(item)
+        idx = input("Got these items by the selected name. Choose one: ")
+        item = items[idx]
+    else:  # there is just one
+        item, = items
+
+    print("This is the chosen item:")
+    pprint(item)
+    field = input("The field to edit: ('.' for nested fields)")
+    if field == "id":
+        print("ERROR: cannot edit id")
+        exit(1)
+    if field in item:
+        keys = field.spilt('.')
+        value = item
+        for key in keys:
+            try:
+                value = item[key]
+            except KeyError:
+                print("ERROR: invalid field")  # TODO: make more clear
+    pprint("Current Value:", value)
+    new_val = input("New value: ")
+    # TODO: check if valid value
+    value = new_val
+
+    output = subprocess.run(f'echo "{json.dumps(item)}" | bw encode', capture_output=True, text=True, shell=True)
+    encoded_json = ""
+
+    subprocess.run(["bw", "item", item['id'], 
+
+if sys.argv[1] == "new":
+
+else:
+    print("Please give a task (one of 'edit', 'new')")
+    exit(1)
+
+    
+
+
+
+    
+
+# END MAIN
+
+# schedule new logout
+output = subprocess.run(f'echo "bw logout" | at now + {AUTO_LOGOUT} minutes', capture_output=True, text=True, shell=True)
+job_id = output.stderr.split("\n")[1].split()[1]
+output = subprocess.run(["keyctl", "add", "user", "bw_logout", job_id, "@u"], capture_output=True, text=True)
+output = subprocess.run(["keyctl", "timeout", str(AUTO_LOGOUT*60)], capture_output=True, text=True)

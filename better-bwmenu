@@ -7,18 +7,30 @@ import json
 from enum import IntEnum
 from pprint import pprint
 
+# dependencies
+#   - bitwarden-cli  (authenticated once using apisecret)
+#   - keyctl
+#   - at
+
+# config
+
 EMAIL = "joseph@holten.com"
 method = 3
-AUTO_LOCK = 1800
+AUTO_LOCK = 900
 AUTO_LOGOUT = 120   # in minutes
 
-def bw_status():
+def bw_status(session_key=""):
+    if session_key:
+        output = subprocess.run(['bw', 'status', '--session', session_key], capture_output=True, text=True)
+        #print(output)
+        return json.loads(output.stdout)
+    
+    output = subprocess.run(['bw', 'status'], capture_output=True, text=True)
+    #print(output)
     return json.loads(subprocess.run(['bw', 'status'], capture_output=True, text=True).stdout)
 
-def extract_session_key(message: str) -> str:
-    key_start = message.find('"')
-    key_end = message.find('"', key_start+1)
-    return message[key_start+1:key_end]
+def all_unique(container):
+    return len(container) == len(set(container))
 
 status = bw_status()
 
@@ -26,22 +38,21 @@ session_key = ""
 
 if status['status'] == 'unlocked':
     session_key = os.environ.get('BW_SESSION')
+    print("Vault unlocked!", file=sys.stderr)
 
 else:
     # try to find session key in keyctl 
     output = subprocess.run(["keyctl", "request", "user", "bw_session"], capture_output=True, text=True)
 
-    # session key available (i.e. defacto unlocked)
-    if output.stderr == '' and output.stdout.rstrip("\n").isdigit():  
+    # session key available
+    if not output.stderr and output.stdout.rstrip("\n").isdigit():  
         key_id = output.stdout.rstrip("\n")
         output = subprocess.run(["keyctl", "print", key_id], capture_output=True, text=True)
 
         session_key = output.stdout.rstrip("\n")
-        
-        print("Success getting session_key from keyctl")
 
-    # no session key saved with keyctl (i.e. locked or unauthenticated)
-    else:
+    # no session key saved with keyctl (i.e. locked or unauthenticated) or session key invalid
+    if output.stderr or bw_status(session_key)['status'] != "unlocked":
         # definitely need password
         password = subprocess.run(['rofi', '-dmenu', '-p', 'Master Password', '-password', '-lines' ,'0'], capture_output=True, text=True).stdout
         password = password.rstrip('\n')
@@ -50,19 +61,27 @@ else:
 
         if status['status'] == 'unauthenticated':
             code = subprocess.run(['rofi', '-dmenu','-p', 'YubiKey 2FA code', '-password', '-lines' ,'0'], capture_output=True, text=True).stdout.rstrip("\n")
-            output = subprocess.run(['bw', 'login', 'joseph@holten.com', password, '--method', '3', '--code', code], capture_output=True, text=True)
+            output = subprocess.run(['bw', 'login', 'joseph@holten.com', password, '--method', '3', '--code', code, "--raw"], capture_output=True, text=True)
             
             if not output.stdout.startswith('You are logged in!'):   # failed at logging in
                 print("Error logging in: ", output, file=sys.stderr)
                 exit(1)
 
+            print("Logged into vault", file=sys.stderr)
+
+
         elif status['status'] == 'locked':
-            output = subprocess.run(["bw", "unlock", password]) 
+            output = subprocess.run(["bw", "unlock", password, "--raw"], capture_output=True, text=True) 
+            print("Unlocked vault", file=sys.stderr)
 
         else:
             assert False, f"Unhandled status {status}"
 
-        session_key = extract_session_key(output.stdout)
+        session_key = output.stdout.rstrip("\n")
+
+    else:
+        print("Success getting session_key from keyctl, session_key is", session_key, file=sys.stderr)
+
 
 
 # register session_key with keyctl
@@ -89,31 +108,18 @@ elif output.stderr != "request_key: Required key not available\n":  # some error
 
 output = subprocess.run(["bw", "list", "items", "--session", session_key], capture_output=True, text=True)
 items = json.loads(output.stdout)
+items = [ item for item in items if 'login' in item ]  # restrict ourselves to login
 
-if (sys.argc == 1):   # init call to program
-    # list all items by name
-    for item in items:
-        print(item['name'])   # TODO: with meta search of the url
+rofi_input = [ item['name'] for item in items ]
+rofi_input = "\n".join(rofi_input)
 
-if (sys.argc == 2):
-    name = sys.argv[1]
+output = subprocess.run(f'echo "{rofi_input}" | rofi -dmenu -p BW', capture_output=True, text=True, shell=True)
+name = output.stdout.rstrip("\n")
+item = list(filter(lambda item: item['name'] == name, items))[0]
 
-    identifiers = ['name', 'username', 'url', 'id']
-    for id_type in identifiers:
-        if duplicates:
-            continue
-        else:
-            for (id in items_by_id_type):
-                print(id)
-            
-
-
-
-
-output = subprocess.run(f'bw list items --session {session_key}', capture_output=True, text=True, shell=True)
-
-items = json.loads(output.stdout)
-pprint(items)
+subprocess.run(["xdotool", "type", item['login']['username']])
+subprocess.run(["xdotool", "key", "Tab"])
+subprocess.run(["xdotool", "type", item['login']['password']])
 
 # END MAIN
 
