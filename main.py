@@ -88,10 +88,24 @@ elif output.stderr != "request_key: Required key not available\n":  # some error
 # MAIN PART
 
 output = subprocess.run(["bw", "list", "items", "--session", session_key], capture_output=True, text=True)
-items = json.loads(
+items = json.loads(output.stdout)
 
 if (sys.argc == 1):   # init call to program
     # list all items by name
+    for item in items:
+        print(item['name'])   # TODO: with meta search of the url
+
+if (sys.argc == 2):
+    name = sys.argv[1]
+
+    identifiers = ['name', 'username', 'url', 'id']
+    for id_type in identifiers:
+        if duplicates:
+            continue
+        else:
+            for (id in items_by_id_type):
+                print(id)
+            
 
 
 
